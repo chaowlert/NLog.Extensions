@@ -13,7 +13,8 @@ namespace NLog.Targets.Wrappers
     public class ConcurrentTargetWrapper : WrapperTargetBase
     {
         Timer timer;
-        readonly ConcurrentQueue<AsyncLogEventInfo> queue = new ConcurrentQueue<AsyncLogEventInfo>();
+        readonly ConcurrentQueue<AsyncLogEventInfo> eventLogQueue = new ConcurrentQueue<AsyncLogEventInfo>();
+        readonly ConcurrentQueue<AsyncContinuation> continuationQueue = new ConcurrentQueue<AsyncContinuation>();
 
         [DefaultValue(100)]
         public int BatchSize { get; set; }
@@ -26,6 +27,18 @@ namespace NLog.Targets.Wrappers
 
         [DefaultValue(10000)]
         public int QueueLimit { get; set; }
+
+        public ConcurrentTargetWrapper() : this(null) { }
+        public ConcurrentTargetWrapper(Target wrappedTarget)
+            : this(wrappedTarget, 10000, AsyncTargetWrapperOverflowAction.Discard) { }
+        public ConcurrentTargetWrapper(Target wrappedTarget, int queueLimit, AsyncTargetWrapperOverflowAction overflowAction)
+        {
+            this.WrappedTarget = wrappedTarget;
+            this.BatchSize = 100;
+            this.TimeToSleepBetweenBatches = 50;
+            this.QueueLimit = queueLimit;
+            this.OverflowAction = overflowAction;
+        }
 
         protected override void CloseTarget()
         {
@@ -40,7 +53,8 @@ namespace NLog.Targets.Wrappers
 
         protected override void FlushAsync(AsyncContinuation asyncContinuation)
         {
-            Task.Run(() => ProcessQueue(asyncContinuation));
+            continuationQueue.Enqueue(asyncContinuation);
+            Task.Run(() => ProcessQueue(null));
         }
 
         protected override void InitializeTarget()
@@ -53,18 +67,18 @@ namespace NLog.Targets.Wrappers
         {
             this.MergeEventProperties(logEvent.LogEvent);
             this.PrecalculateVolatileLayouts(logEvent.LogEvent);
-            if (queue.Count >= this.QueueLimit)
+            if (eventLogQueue.Count >= this.QueueLimit)
             {
                 switch (this.OverflowAction)
                 {
                     case AsyncTargetWrapperOverflowAction.Grow:
-                        queue.Enqueue(logEvent);
+                        eventLogQueue.Enqueue(logEvent);
                         break;
                     case AsyncTargetWrapperOverflowAction.Discard:
                         break;
                     case AsyncTargetWrapperOverflowAction.Block:
                         ProcessQueue(null);
-                        queue.Enqueue(logEvent);
+                        eventLogQueue.Enqueue(logEvent);
                         break;
                     default:
                         throw new ArgumentOutOfRangeException();
@@ -72,56 +86,75 @@ namespace NLog.Targets.Wrappers
             }
             else
             {
-                queue.Enqueue(logEvent);
+                eventLogQueue.Enqueue(logEvent);
             }
         }
 
+        int processingFlag;
+        int processingCount;
         private void ProcessQueue(object state)
         {
-            var asyncContinuation = state as AsyncContinuation;
+            Interlocked.Increment(ref processingCount);
+            if (Interlocked.CompareExchange(ref processingFlag, 1, 0) == 1)
+            {
+                return;
+            }
 
             try
             {
-                var logEvents = BatchDequeue().ToArray();
-
-                if (logEvents.Length == 0)
+                do
                 {
-                    if (asyncContinuation != null)
-                    {
-                        asyncContinuation(null);
-                    }
-                }
-                else 
-                {
-                    if (asyncContinuation != null)
-                    {
-                        var countDown = logEvents.Length;
-                        logEvents = logEvents.Select(logEvent =>
-                        {
-                            var continuation = logEvent.Continuation;
-                            return logEvent.LogEvent.WithContinuation(ex =>
-                            {
-                                continuation(ex);
-                                if (Interlocked.Decrement(ref countDown) == 0)
-                                {
-                                    asyncContinuation(null);
-                                }
-                            });
-                        }).ToArray();
-                    }
-                    this.WrappedTarget.WriteAsyncLogEvents(logEvents);
-                }
+                    AsyncContinuation asyncContinuation;
+                    continuationQueue.TryDequeue(out asyncContinuation);
+                    ProcessQueue(asyncContinuation);
+                } while (Interlocked.Decrement(ref processingCount) > 0);
             }
             catch (Exception ex)
             {
                 InternalLogger.Error("Error in ConcurrentTargetWrapper.ProcessQueue: {0}", ex);
+            }
+            finally
+            {
+                Interlocked.Exchange(ref processingFlag, 0);
+            }
+        }
+
+        private void ProcessQueue(AsyncContinuation asyncContinuation)
+        {
+            if (eventLogQueue.Count == 0)
+            {
+                if (asyncContinuation != null)
+                {
+                    asyncContinuation(null);
+                }
+            }
+            else
+            {
+                var logEvents = BatchDequeue().ToArray();
+                if (asyncContinuation != null)
+                {
+                    var countDown = logEvents.Length;
+                    logEvents = logEvents.Select(logEvent =>
+                    {
+                        var continuation = logEvent.Continuation;
+                        return logEvent.LogEvent.WithContinuation(ex =>
+                        {
+                            continuation(ex);
+                            if (Interlocked.Decrement(ref countDown) == 0)
+                            {
+                                asyncContinuation(null);
+                            }
+                        });
+                    }).ToArray();
+                }
+                this.WrappedTarget.WriteAsyncLogEvents(logEvents);
             }
         }
 
         private IEnumerable<AsyncLogEventInfo> BatchDequeue()
         {
             AsyncLogEventInfo logEvent;
-            for (int i = this.QueueLimit; i > 0 && queue.TryDequeue(out logEvent); i--)
+            for (int i = this.QueueLimit; i > 0 && eventLogQueue.TryDequeue(out logEvent); i--)
             {
                 yield return logEvent;
             }

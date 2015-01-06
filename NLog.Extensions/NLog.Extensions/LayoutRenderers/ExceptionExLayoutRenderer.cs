@@ -21,7 +21,15 @@ namespace NLog.LayoutRenderers
                 }
                 else
                 {
-                    base.AppendMethod(sb, ex);
+                    var target = ex.TargetSite;
+                    if (target != null)
+                    {
+                        if (target.DeclaringType != null)
+                        {
+                            sb.Append(target.DeclaringType).Append(".");
+                        }
+                        sb.Append(target.Name);
+                    }
                 }
 
             }

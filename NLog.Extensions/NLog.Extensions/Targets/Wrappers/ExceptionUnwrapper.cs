@@ -9,28 +9,58 @@ namespace NLog.Targets.Wrappers
     [Target("ExceptionUnwrapper", IsWrapper = true)]
     public class ExceptionUnwrapperTarget : WrapperTargetBase
     {
-        HashSet<string> shortTypeExceptions = new HashSet<string>();
-
-        public string ShortTypeExceptions
+        HashSet<string> unwrapExceptions = new HashSet<string>();
+        public string UnwrapExceptions
         {
-            get { return string.Join(",", shortTypeExceptions); }
-            set { shortTypeExceptions = new HashSet<string>(value.Split(',').Select(s => s.Trim())); }
+            get { return string.Join(",", unwrapExceptions); }
+            set { unwrapExceptions = new HashSet<string>(value.Split(',').Select(s => s.Trim())); }
         }
 
         protected override void Write(AsyncLogEventInfo logEvent)
         {
+            ProcessLogEvent(logEvent, this.WriteAsyncLogEvent, this.WriteAsyncLogEvents);
+        }
+
+        protected override void Write(AsyncLogEventInfo[] logEvents)
+        {
+            var list = new List<AsyncLogEventInfo>(logEvents.Length);
+            foreach (var logEvent in logEvents)
+            {
+                ProcessLogEvent(logEvent, list.Add, list.AddRange);
+            }
+            this.WrappedTarget.WriteAsyncLogEvents(list.ToArray());
+        }
+
+        private void ProcessLogEvent(AsyncLogEventInfo logEvent, Action<AsyncLogEventInfo> oneItemAction, Action<AsyncLogEventInfo[]> multipleLogEventAction)
+        {
             if (logEvent.LogEvent.Exception == null)
             {
-                this.WrappedTarget.WriteAsyncLogEvent(logEvent);
+                oneItemAction(logEvent);
                 return;
             }
 
             var aggregateException = logEvent.LogEvent.Exception as AggregateException;
             if (aggregateException != null)
             {
-                var innerExceptions = aggregateException.Flatten().InnerExceptions.Select(Unwrap).ToList();
-                var countDown = innerExceptions.Count;
-                var continuation = logEvent.Continuation;
+                UnwrapAggregateLogEvent(logEvent, aggregateException, oneItemAction, multipleLogEventAction);
+                return;
+            }
+
+            UnwrapLogEvent(logEvent, oneItemAction);
+        }
+
+        private void UnwrapAggregateLogEvent(AsyncLogEventInfo logEvent, AggregateException exception, Action<AsyncLogEventInfo> oneItemAction, Action<AsyncLogEventInfo[]> multipleLogEventAction)
+        {
+            var innerExceptions = exception.Flatten().InnerExceptions.Select(UnwrapException).ToList();
+            var continuation = logEvent.Continuation;
+            var countDown = innerExceptions.Count;
+            if (countDown <= 1)
+            {
+                logEvent = CloneEventInfo(logEvent.LogEvent, innerExceptions.FirstOrDefault()).WithContinuation(continuation);
+                oneItemAction(logEvent);
+            }
+            else
+            {
                 var logEvents = innerExceptions.Select(ex =>
                     CloneEventInfo(logEvent.LogEvent, ex).WithContinuation(ex2 =>
                     {
@@ -39,22 +69,24 @@ namespace NLog.Targets.Wrappers
                             continuation(null);
                         }
                     })).ToArray();
-                this.WrappedTarget.WriteAsyncLogEvents(logEvents);
-                return;
+                multipleLogEventAction(logEvents);
             }
+        }
 
-            var unwrapped = Unwrap(logEvent.LogEvent.Exception);
+        private void UnwrapLogEvent(AsyncLogEventInfo logEvent, Action<AsyncLogEventInfo> oneItemAction)
+        {
+            var unwrapped = UnwrapException(logEvent.LogEvent.Exception);
             if (!object.ReferenceEquals(unwrapped, logEvent.LogEvent.Exception))
             {
                 var continuation = logEvent.Continuation;
                 logEvent = CloneEventInfo(logEvent.LogEvent, unwrapped).WithContinuation(continuation);
             }
-            this.WrappedTarget.WriteAsyncLogEvent(logEvent);
+            oneItemAction(logEvent);            
         }
 
-        private Exception Unwrap(Exception exception)
+        private Exception UnwrapException(Exception exception)
         {
-            while (shortTypeExceptions.Contains(exception.GetType().Name))
+            while (unwrapExceptions.Contains(exception.GetType().Name))
             {
                 exception = exception.InnerException;
             }
