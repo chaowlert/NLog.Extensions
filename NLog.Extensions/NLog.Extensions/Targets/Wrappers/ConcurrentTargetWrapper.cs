@@ -4,7 +4,6 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
 using System.Threading;
-using System.Threading.Tasks;
 using NLog.Common;
 
 namespace NLog.Targets.Wrappers
@@ -27,6 +26,8 @@ namespace NLog.Targets.Wrappers
 
         [DefaultValue(10000)]
         public int QueueLimit { get; set; }
+
+        public bool ParallelWrite { get; set; }
 
         public ConcurrentTargetWrapper() : this(null) { }
         public ConcurrentTargetWrapper(Target wrappedTarget)
@@ -54,7 +55,6 @@ namespace NLog.Targets.Wrappers
         protected override void FlushAsync(AsyncContinuation asyncContinuation)
         {
             continuationQueue.Enqueue(asyncContinuation);
-            Task.Run(() => ProcessQueue(null));
         }
 
         protected override void InitializeTarget()
@@ -77,7 +77,10 @@ namespace NLog.Targets.Wrappers
                     case AsyncTargetWrapperOverflowAction.Discard:
                         break;
                     case AsyncTargetWrapperOverflowAction.Block:
-                        ProcessQueue(null);
+                        var waitHandler = new ManualResetEventSlim();
+                        continuationQueue.Enqueue(ex => waitHandler.Set());
+                        waitHandler.Wait();
+                        waitHandler.Dispose();
                         eventLogQueue.Enqueue(logEvent);
                         break;
                     default:
@@ -92,7 +95,7 @@ namespace NLog.Targets.Wrappers
 
         int processingFlag;
         int processingCount;
-        private void ProcessQueue(object state)
+        private void SequentialProcessQueue()
         {
             Interlocked.Increment(ref processingCount);
             if (Interlocked.CompareExchange(ref processingFlag, 1, 0) == 1)
@@ -104,9 +107,7 @@ namespace NLog.Targets.Wrappers
             {
                 do
                 {
-                    AsyncContinuation asyncContinuation;
-                    continuationQueue.TryDequeue(out asyncContinuation);
-                    ProcessQueue(asyncContinuation);
+                    ProcessQueueOnce();
                 } while (Interlocked.Decrement(ref processingCount) > 0);
             }
             catch (Exception ex)
@@ -119,8 +120,22 @@ namespace NLog.Targets.Wrappers
             }
         }
 
-        private void ProcessQueue(AsyncContinuation asyncContinuation)
+        private void ProcessQueue(object state)
         {
+            if (this.ParallelWrite)
+            {
+                ProcessQueueOnce();
+            }
+            else
+            {
+                SequentialProcessQueue();
+            }
+        }
+
+        private void ProcessQueueOnce()
+        {
+            var asyncContinuation = GetAsyncContinuation();
+
             if (eventLogQueue.Count == 0)
             {
                 if (asyncContinuation != null)
@@ -130,7 +145,7 @@ namespace NLog.Targets.Wrappers
             }
             else
             {
-                var logEvents = BatchDequeue().ToArray();
+                var logEvents = BatchDequeue(eventLogQueue, this.BatchSize).ToArray();
                 if (asyncContinuation != null)
                 {
                     var countDown = logEvents.Length;
@@ -151,12 +166,39 @@ namespace NLog.Targets.Wrappers
             }
         }
 
-        private IEnumerable<AsyncLogEventInfo> BatchDequeue()
+        private AsyncContinuation GetAsyncContinuation()
         {
-            AsyncLogEventInfo logEvent;
-            for (int i = this.QueueLimit; i > 0 && eventLogQueue.TryDequeue(out logEvent); i--)
+            int count = continuationQueue.Count;
+            if (count == 0)
             {
-                yield return logEvent;
+                return null;
+            }
+
+            var continuations = BatchDequeue(continuationQueue, count);
+            return continuations.Aggregate(default(AsyncContinuation), (a, b) => a + SafeWrap(b));
+        }
+
+        private static AsyncContinuation SafeWrap(AsyncContinuation continuation)
+        {
+            return ex =>
+            {
+                try
+                {
+                    continuation(ex);
+                }
+                catch (Exception ex2)
+                {
+                    InternalLogger.Error("Error when process continuation: {0}", ex2);
+                }
+            };
+        }
+
+        private static IEnumerable<T> BatchDequeue<T>(ConcurrentQueue<T> queue, int dequeueCount)
+        {
+            T item;
+            for (int i = dequeueCount; i > 0 && queue.TryDequeue(out item); i--)
+            {
+                yield return item;
             }
         }  
     }

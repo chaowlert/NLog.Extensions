@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
@@ -61,12 +62,14 @@ namespace NLog.Targets.Wrappers
             }
             else
             {
+                var exceptions = new ConcurrentBag<Exception>();
                 var logEvents = innerExceptions.Select(ex =>
                     CloneEventInfo(logEvent.LogEvent, ex).WithContinuation(ex2 =>
                     {
+                        exceptions.Add(ex2);
                         if (Interlocked.Decrement(ref countDown) == 0)
                         {
-                            continuation(null);
+                            continuation(exceptions.Count == 0 ? null : new AggregateException(exceptions));
                         }
                     })).ToArray();
                 multipleLogEventAction(logEvents);
