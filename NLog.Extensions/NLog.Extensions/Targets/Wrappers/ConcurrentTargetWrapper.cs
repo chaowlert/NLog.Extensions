@@ -77,10 +77,12 @@ namespace NLog.Targets.Wrappers
                     case AsyncTargetWrapperOverflowAction.Discard:
                         break;
                     case AsyncTargetWrapperOverflowAction.Block:
-                        var waitHandler = new ManualResetEventSlim();
-                        continuationQueue.Enqueue(ex => waitHandler.Set());
-                        waitHandler.Wait();
-                        waitHandler.Dispose();
+                        using (var waitHandler = new ManualResetEventSlim())
+                        {
+                            // ReSharper disable once AccessToDisposedClosure
+                            continuationQueue.Enqueue(ex => waitHandler.Set());
+                            waitHandler.Wait();
+                        }
                         eventLogQueue.Enqueue(logEvent);
                         break;
                     default:
@@ -103,21 +105,12 @@ namespace NLog.Targets.Wrappers
                 return;
             }
 
-            try
+            do
             {
-                do
-                {
-                    ProcessQueueOnce();
-                } while (Interlocked.Decrement(ref processingCount) > 0);
-            }
-            catch (Exception ex)
-            {
-                InternalLogger.Error("Error in ConcurrentTargetWrapper.ProcessQueue: {0}", ex);
-            }
-            finally
-            {
-                Interlocked.Exchange(ref processingFlag, 0);
-            }
+                ProcessQueueOnce();
+            } while (Interlocked.Decrement(ref processingCount) > 0);
+
+            Interlocked.Exchange(ref processingFlag, 0);
         }
 
         private void ProcessQueue(object state)
@@ -134,35 +127,42 @@ namespace NLog.Targets.Wrappers
 
         private void ProcessQueueOnce()
         {
-            var asyncContinuation = GetAsyncContinuation();
-
-            if (eventLogQueue.Count == 0)
+            try
             {
-                if (asyncContinuation != null)
+                var asyncContinuation = GetAsyncContinuation();
+
+                if (eventLogQueue.Count == 0)
                 {
-                    asyncContinuation(null);
+                    if (asyncContinuation != null)
+                    {
+                        asyncContinuation(null);
+                    }
+                }
+                else
+                {
+                    var logEvents = BatchDequeue(eventLogQueue, this.BatchSize).ToArray();
+                    if (asyncContinuation != null)
+                    {
+                        var countDown = logEvents.Length;
+                        logEvents = logEvents.Select(logEvent =>
+                        {
+                            var continuation = logEvent.Continuation;
+                            return logEvent.LogEvent.WithContinuation(ex =>
+                            {
+                                continuation(ex);
+                                if (Interlocked.Decrement(ref countDown) == 0)
+                                {
+                                    asyncContinuation(null);
+                                }
+                            });
+                        }).ToArray();
+                    }
+                    this.WrappedTarget.WriteAsyncLogEvents(logEvents);
                 }
             }
-            else
+            catch (Exception ex)
             {
-                var logEvents = BatchDequeue(eventLogQueue, this.BatchSize).ToArray();
-                if (asyncContinuation != null)
-                {
-                    var countDown = logEvents.Length;
-                    logEvents = logEvents.Select(logEvent =>
-                    {
-                        var continuation = logEvent.Continuation;
-                        return logEvent.LogEvent.WithContinuation(ex =>
-                        {
-                            continuation(ex);
-                            if (Interlocked.Decrement(ref countDown) == 0)
-                            {
-                                asyncContinuation(null);
-                            }
-                        });
-                    }).ToArray();
-                }
-                this.WrappedTarget.WriteAsyncLogEvents(logEvents);
+                InternalLogger.Error("Error in ConcurrentTargetWrapper.ProcessQueue: {0}", ex);
             }
         }
 

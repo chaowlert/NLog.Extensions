@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<package >
+  <metadata>
+    <id>NLog.Extensions.2</id>
+    <version>1.0.0</version>
+    <title>NLog Extensions</title>
+    <authors>Chaowlert</authors>
+    <owners>Chaowlert</owners>
+    <projectUrl>https://github.com/chaowlert/NLog.Extensions</projectUrl>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <description>Extends ExceptionLayoutRenderer AsyncTargetWrapper and provides ExceptionUnwrapper</description>
+    <releaseNotes>Initial release</releaseNotes>
+    <copyright>Copyright 2015</copyright>
+    <tags>NLog AsyncTargetWrapper ExceptionLayoutRenderer ExceptionUnwrapper</tags>
+  </metadata>
+</package>
