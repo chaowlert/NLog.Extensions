@@ -43,10 +43,7 @@ namespace NLog.Targets.Wrappers
 
         protected override void CloseTarget()
         {
-            if (timer != null)
-            {
-                timer.Dispose();
-            }
+            timer?.Dispose();
             ProcessQueue(null);
 
             base.CloseTarget();
@@ -133,10 +130,7 @@ namespace NLog.Targets.Wrappers
 
                 if (eventLogQueue.Count == 0)
                 {
-                    if (asyncContinuation != null)
-                    {
-                        asyncContinuation(null);
-                    }
+                    asyncContinuation?.Invoke(null);
                 }
                 else
                 {
