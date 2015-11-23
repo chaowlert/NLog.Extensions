@@ -19,7 +19,7 @@ namespace NLog.Targets.Wrappers
 
         protected override void Write(AsyncLogEventInfo logEvent)
         {
-            ProcessLogEvent(logEvent, this.WriteAsyncLogEvent, this.WriteAsyncLogEvents);
+            ProcessLogEvent(logEvent, this.WrappedTarget.WriteAsyncLogEvent, this.WrappedTarget.WriteAsyncLogEvents);
         }
 
         protected override void Write(AsyncLogEventInfo[] logEvents)
